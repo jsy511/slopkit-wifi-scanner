@@ -1,0 +1,264 @@
+
+#!/usr/bin/env python3
+
+import argparse
+import json
+import shutil
+import subprocess
+import sys
+import time
+from datetime import datetime, timezone
+from pathlib import Path
+
+# ==========================================
+# SL0PKIT WIFI SCANNER
+# Version: 1.0
+# Platform: Android / Termux
+# Mode: Passive Wi-Fi discovery
+# ==========================================
+
+RED = "\033[91m"
+GREEN = "\033[92m"
+CYAN = "\033[96m"
+YELLOW = "\033[93m"
+RESET = "\033[0m"
+BOLD = "\033[1m"
+
+
+def banner():
+    print(CYAN + BOLD)
+    print("  ███████╗██╗      ██████╗ ██████╗ ██╗  ██╗")
+    print("  ██╔════╝██║     ██╔═══██╗██╔══██╗██║ ██╔╝")
+    print("  ███████╗██║     ██║   ██║██████╔╝█████╔╝")
+    print("  ╚════██║██║     ██║   ██║██╔═══╝ ██╔═██╗")
+    print("  ███████║███████╗╚██████╔╝██║     ██║  ██╗")
+    print("  ╚══════╝╚══════╝ ╚═════╝ ╚═╝     ╚═╝  ╚═╝")
+    print(RESET)
+    print(GREEN + "        SL0PKIT WIFI SCANNER v1.0" + RESET)
+    print("        Android Network Discovery")
+    print("=" * 55)
+
+
+def channel_from_frequency(freq):
+    try:
+        freq = int(freq)
+    except (ValueError, TypeError):
+        return "?"
+
+    if 2412 <= freq <= 2472:
+        return str((freq - 2407) // 5)
+
+    if freq == 2484:
+        return "14"
+
+    if 5000 <= freq < 5900:
+        return str((freq - 5000) // 5)
+
+    if 5955 <= freq <= 7115:
+        return str((freq - 5950) // 5)
+
+    return "?"
+
+
+def scan_wifi():
+    command = shutil.which("termux-wifi-scaninfo")
+
+    if not command:
+        print(RED + "[ERROR] Termux:API not installed." + RESET)
+        print("Install it using: pkg install termux-api")
+        return []
+
+    try:
+        result = subprocess.run(
+            [command],
+            capture_output=True,
+            text=True,
+            timeout=20
+        )
+
+        if result.returncode != 0:
+            print(RED + "[ERROR] Android scan failed." + RESET)
+            print(result.stderr.strip())
+            return []
+
+        data = json.loads(result.stdout)
+
+        if not isinstance(data, list):
+            print(RED + "[ERROR] Unexpected scan response." + RESET)
+            return []
+
+        return data
+
+    except subprocess.TimeoutExpired:
+        print(RED + "[ERROR] Scan timed out." + RESET)
+
+    except json.JSONDecodeError:
+        print(RED + "[ERROR] Invalid scan data." + RESET)
+
+    except Exception as error:
+        print(RED + f"[ERROR] {error}" + RESET)
+
+    return []
+
+
+def process_networks(data):
+    networks = []
+
+    for item in data:
+        if not isinstance(item, dict):
+            continue
+
+        frequency = item.get(
+            "frequency_mhz",
+            item.get("frequency")
+        )
+
+        try:
+            signal = int(item.get("level"))
+        except (ValueError, TypeError):
+            signal = None
+
+        networks.append({
+            "SSID": item.get("ssid") or "<hidden/unavailable>",
+            "BSSID": item.get("bssid") or "?",
+            "Signal": signal,
+            "Frequency": frequency or "?",
+            "Channel": channel_from_frequency(frequency),
+            "Security": item.get("capabilities") or "Unknown"
+        })
+
+    networks.sort(
+        key=lambda x: x["Signal"]
+        if x["Signal"] is not None else -999,
+        reverse=True
+    )
+
+    return networks
+
+
+def signal_quality(signal):
+    if signal is None:
+        return "UNKNOWN"
+
+    if signal >= -50:
+        return "EXCELLENT"
+
+    if signal >= -60:
+        return "GOOD"
+
+    if signal >= -70:
+        return "FAIR"
+
+    return "WEAK"
+
+
+def display_networks(networks):
+    print("\n" + CYAN + BOLD + " DISCOVERED NETWORKS" + RESET)
+    print("=" * 85)
+
+    if not networks:
+        print(YELLOW + "No networks returned by Android." + RESET)
+        return
+
+    for number, network in enumerate(networks, 1):
+        signal = network["Signal"]
+
+        signal_text = (
+            f"{signal} dBm"
+            if signal is not None else "Unknown"
+        )
+
+        frequency = network["Frequency"]
+
+        print(
+            f"\n{GREEN}[{number}]{RESET} "
+            f"{BOLD}{network['SSID']}{RESET}"
+        )
+
+        print(f"    BSSID:     {network['BSSID']}")
+        print(f"    Signal:    {signal_text}")
+        print(f"    Quality:   {signal_quality(signal)}")
+        print(f"    Channel:   {network['Channel']}")
+        print(f"    Frequency: {frequency} MHz")
+        print(f"    Security:  {network['Security']}")
+
+    print("\n" + "=" * 85)
+    print(f"Total networks discovered: {len(networks)}")
+    print("Mode: PASSIVE DISCOVERY")
+
+
+def export_json(networks, filename):
+    output = {
+        "scanner": "SL0PKIT WiFi Scanner",
+        "version": "1.0",
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "network_count": len(networks),
+        "networks": networks
+    }
+
+    Path(filename).write_text(
+        json.dumps(output, indent=4),
+        encoding="utf-8"
+    )
+
+    print(GREEN + f"\n[+] Results saved to {filename}" + RESET)
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="SL0PKIT passive Wi-Fi scanner"
+    )
+
+    parser.add_argument(
+        "--json",
+        metavar="FILE",
+        help="Export scan results to JSON"
+    )
+
+    parser.add_argument(
+        "--watch",
+        type=int,
+        metavar="SECONDS",
+        help="Repeat scans at the specified interval (minimum 5)"
+    )
+
+    args = parser.parse_args()
+
+    if args.watch is not None and args.watch < 5:
+        parser.error("--watch must be at least 5 seconds")
+
+    banner()
+
+    try:
+        while True:
+            if args.watch:
+                print("\033[2J\033[H", end="")
+                banner()
+
+            print(YELLOW + "\n[*] Scanning Android Wi-Fi results..." + RESET)
+
+            raw_data = scan_wifi()
+            networks = process_networks(raw_data)
+
+            display_networks(networks)
+
+            if args.json:
+                export_json(networks, args.json)
+
+            if not args.watch:
+                break
+
+            print(
+                YELLOW
+                + f"\n[*] Next refresh in {args.watch} seconds."
+                + RESET
+            )
+
+            time.sleep(args.watch)
+
+    except KeyboardInterrupt:
+        print("\n" + RED + "[!] Scanner stopped." + RESET)
+
+
+if __name__ == "__main__":
+    main()
